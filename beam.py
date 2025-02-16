@@ -1,5 +1,7 @@
 import os
 import re
+from heapq import nlargest
+from typing import Any, Callable, List
 
 import polars as pl
 import torch
@@ -7,54 +9,59 @@ import torch.nn.functional as F
 from rich import print
 from transformers import AutoModel, AutoTokenizer, pipeline
 
-SYSTEM_PROMPT = """
-Solve the following math problem efficiently and clearly:
 
-    - For simple problems (2 steps or fewer):
-    Provide a concise solution with minimal explanation.
+def beam_search(
+    initial_state: Any,
+    beam_width: int,
+    branching_factor: int,
+    evaluate: Callable[[Any], float],
+    branch: Callable[[Any, int], List[Any]],
+    is_terminal: Callable[[Any], bool],
+    num_terminals: int,
+    max_steps: int = 100,
+) -> Any:
+    """
+    Perform beam search.
 
-    - For complex problems (3 steps or more):
-    Use this step-by-step format:
+    Parameters:
+    - initial_state: The starting state of the search.
+    - beam_width: The number of states to keep at each step.
+    - branching_factor: The number of branches to generate per state.
+    - evaluate: A function that assigns a score to a state.
+    - branch: A function that generates possible next states, given a branching factor.
+    - is_terminal: A function that determines if a state is terminal.
+    - num_terminals: The number of terminal states to collect before returning the best one.
+    - max_steps: Maximum number of steps to run the search.
 
-    ## Step 1: [Concise description]
-    [Brief explanation and calculations]
+    Returns:
+    - The best final state found among collected terminal states.
+    """
+    beam = [initial_state]  # Initialize beam with the initial state
+    terminal_states = []
 
-    ## Step 2: [Concise description]
-    [Brief explanation and calculations]
+    for _ in range(max_steps):
+        candidates = []
+        for state in beam:
+            if is_terminal(state):
+                terminal_states.append(state)
+                if len(terminal_states) >= num_terminals:
+                    return max(
+                        terminal_states, key=evaluate
+                    )  # Return the best terminal state found
+            candidates.extend(
+                branch(state, branching_factor)
+            )  # Generate possible next states
 
-    ...
+        if not candidates:
+            break  # Stop if there are no more possible expansions
 
+        beam = nlargest(beam_width, candidates, key=evaluate)  # Keep top states
 
-    Regardless of the approach, always conclude with:
-
-    Therefore, the final answer is: $\boxed{answer}$. I hope it is correct.
-
-    Where [answer] is just the final number or expression that solves the problem.
-"""
-
-df = None
-if not os.path.exists("data.csv"):
-    df = pl.read_ndjson("hf://datasets/DongfuJiang/MATH-500/test.jsonl")
-    df.write_json("data.csv")
-else:
-    df = pl.read_json("data.csv")
-print(df.head())
-
-
-def format_conversation(conversation: str):
-    # Match steps using Markdown headers (## Step X:)
-    step_pattern = re.compile(r"(## Step \d+:)(.*)", re.MULTILINE)
-
-    # Split into lines and process
-    lines = conversation.split("\n")
-    for line in lines:
-        step_match = step_pattern.match(line)
-        if step_match:
-            # Print step headers in bold red
-            print(f"[bold red]{step_match.group(1)}[/bold red]{step_match.group(2)}")
-        else:
-            # Print normal lines
-            print(line)
+    return (
+        max(beam + terminal_states, key=evaluate)
+        if terminal_states
+        else max(beam, key=evaluate)
+    )  # Return the best state found
 
 
 def split_conversation(conversation):
@@ -119,32 +126,8 @@ def make_step_rewards(logits, token_masks):
     return all_scores_res
 
 
-model_name = "Qwen/Qwen2.5-Math-PRM-7B"
-device = "cuda"
+del pipe
 
-tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-model = AutoModel.from_pretrained(
-    model_name,
-    device_map=device,
-    torch_dtype=torch.bfloat16,
-    trust_remote_code=True,
-).eval()
-
-model_id = "meta-llama/Llama-3.2-3B-Instruct"
-pipe = pipeline(
-    "text-generation",
-    model=model_id,
-    torch_dtype=torch.bfloat16,
-    device_map="auto",
-)
-messages = [
-    {"role": "system", "content": SYSTEM_PROMPT},
-    {"role": "user", "content": df["problem"][0]},
-]
-outputs = pipe(
-    messages,
-    max_new_tokens=512,
-)
 messages.append(outputs[0]["generated_text"][-1])
 format_conversation(outputs[0]["generated_text"][-1]["content"])
 
