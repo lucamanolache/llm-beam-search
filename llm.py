@@ -1,5 +1,7 @@
 import torch
+from typing import Dict, List
 from transformers import AutoModel, AutoTokenizer, Pipeline, pipeline
+from transformers.integrations.ggml import processors
 
 SYSTEM_PROMPT = """
 Solve the following math problem efficiently and clearly:
@@ -26,7 +28,7 @@ Solve the following math problem efficiently and clearly:
     Where [answer] is just the final number or expression that solves the problem.
 """
 
-def generate_part(pipeline: Pipeline, previous: str, branches: int, max_tokens: int = 100) -> List[str]:
+def generate_part(pipeline: Pipeline, previous: List[Dict], branches: int, max_tokens: int = 250) -> List[str]:
     """
     Generate multiple possible continuations from the previous text
 
@@ -55,17 +57,26 @@ def generate_part(pipeline: Pipeline, previous: str, branches: int, max_tokens: 
     outputs = pipeline(
         previous,
         **generation_config,
-        return_full_text=False  # Only return the new generated text
+        return_full_text=False,  # Only return the new generated text
+        continue_final_message=True,
     )
 
     # Process outputs to stop at newlines
     processed_outputs = []
     for output in outputs:
-        generated_text = output[0]["generated_text"]
-        # Stop at first newline if present
-        if "\n" in generated_text:
-            generated_text = generated_text.split("\n")[0]
-        processed_outputs.append(generated_text)
+        generated_text = output["generated_text"]
+
+        if "## Step" in generated_text:
+            step = generated_text.split("##")[1]
+            next = previous.copy()
+            next[-1]["content"] += f"##{step}"
+            processed_outputs.append((next, False))
+            continue
+        else:
+            next = previous.copy()
+            next[-1]["content"] += generated_text
+            processed_outputs.append((next, True))
+            continue
 
     return processed_outputs
 
@@ -76,22 +87,3 @@ model_pipeline = pipeline(
     torch_dtype=torch.bfloat16,
     device_map="auto",
 )
-
-# messages = [
-#         {"role": "system", "content": SYSTEM_PROMPT},
-#         {"role": "user", "content": df["problem"][0]},
-#     ]
-
-# Example usage:
-model_id = "meta-llama/Llama-2-7b"
-model_pipeline = pipeline(
-    "text-generation",
-    model=model_id,
-    torch_dtype=torch.bfloat16,
-    device_map="auto",
-)
-
-previous_text = "The first step in solving this problem is to"
-continuations = generate_part(model_pipeline, previous_text, branches=3)
-for i, cont in enumerate(continuations):
-    print(f"Branch {i+1}: {previous_text}{cont}")
